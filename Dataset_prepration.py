@@ -1,4 +1,7 @@
 import pandas as pd
+import os
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 music=pd.read_csv("Scenario 2_ AI Music Composer & Listener Insight platform/Music Info.csv")
 user=pd.read_csv("Scenario 2_ AI Music Composer & Listener Insight platform/User Listening History.csv")
@@ -21,9 +24,7 @@ user=pd.read_csv("Scenario 2_ AI Music Composer & Listener Insight platform/User
 # print(user.isnull().sum())
 
 # --- Genre distribution plotting (Matplotlib / Seaborn) ---
-import os
-import matplotlib.pyplot as plt
-import seaborn as sns
+
 
 
 def plot_genre_distribution(df, top_n=10, save_dir='plots', show=True):
