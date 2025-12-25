@@ -16,6 +16,7 @@ audio_files = glob(
 y,sr=librosa.load(audio_files[0])
 
 
-pd.Series(y).plot(figsize=(14,5))
+pd.Series(y[13000, 26000]).plot(figsize=(14,5))
 
 plt.show()
+
