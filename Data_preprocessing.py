@@ -84,8 +84,14 @@ def filter_genre_and_copy_scenario(scenario_dir: Path, copy_suffix: str = "-genr
     files_deleted = 0
     deleted_files = []
 
+    original_rows = len(pd.read_csv(music_info_path))
+    rows_kept = len(df_present)
+    rows_removed = original_rows - rows_kept
+
     summary = {
-        'original_rows': len(pd.read_csv(music_info_path)),
+        'original_rows': original_rows,
+        'rows_kept': rows_kept,
+        'rows_removed': rows_removed,
         'filled_count': filled_count,
         'remaining_missing': remaining_missing,
         'filled_csv_path': str(filled_csv_path),
@@ -99,6 +105,82 @@ def filter_genre_and_copy_scenario(scenario_dir: Path, copy_suffix: str = "-genr
     }
 
     return summary
+
+
+# Mapping of textual genres to integer labels (1..15)
+GENRE_TO_LABEL = {
+    'Blues': 1,
+    'Country': 2,
+    'Electronic': 3,
+    'Folk': 4,
+    'Jazz': 5,
+    'Latin': 6,
+    'Metal': 7,
+    'New Age': 8,
+    'Pop': 9,
+    'Punk': 10,
+    'Rap': 11,
+    'Reggae': 12,
+    'RnB': 13,
+    'Rock': 14,
+    'World': 15,
+}
+
+
+def apply_genre_labeling(scenario_dir: Path,
+                         source_csv_name: str = 'Music Info_genre_present.csv',
+                         out_csv_name: str = 'Music Info_genre_numeric.csv',
+                         genre_col: str = 'genre',
+                         label_col: str = 'genre_label',
+                         mapping: dict = None,
+                         cap_labels_to: int = 15):
+    """Map textual genres to integer labels derived from the source CSV and save a new CSV.
+
+    If `mapping` is None, the function builds a mapping by counting genre frequency
+    in `source_csv_name` and assigns integer labels 1.. based on descending frequency.
+
+    Labels are capped to `cap_labels_to` (default 15): only the top `cap_labels_to`
+    genres receive labels 1..cap_labels_to; other genres will receive 0 (unknown).
+
+    The function expects the source CSV to contain only rows with a valid genre
+    (e.g., the output of `filter_genre_and_copy_scenario`). If not, missing/blank
+    genres are ignored when constructing the mapping so that NaN is not treated
+    as a valid genre label.
+
+    If the source CSV doesn't exist, the function falls back to 'Music Info.csv'.
+
+    Returns a tuple (out_csv_path_str, mapping_used).
+    """
+    source = scenario_dir / source_csv_name
+    if not source.exists():
+        source = scenario_dir / 'Music Info.csv'
+        if not source.exists():
+            raise FileNotFoundError(f"No source CSV found at {scenario_dir}")
+
+    df = pd.read_csv(source)
+    if genre_col not in df.columns:
+        raise KeyError(f"'{genre_col}' column not found in {source}")
+
+    # Build mapping from dataset if not provided
+    if mapping is None:
+        # Drop missing and blank genres to avoid treating NaNs as a valid genre label
+        genres = df[genre_col].dropna().astype(str).str.strip()
+        genres = genres[genres != '']
+        if genres.empty:
+            # Fallback to hardcoded mapping if no genres present in the dataset
+            mapping = GENRE_TO_LABEL.copy()
+        else:
+            # Rank genres by frequency and assign labels 1..cap_labels_to
+            top_genres = genres.value_counts().index.tolist()
+            capped = top_genres[:cap_labels_to]
+            mapping = {g: i + 1 for i, g in enumerate(capped)}
+
+    # Map genres to labels. Unmapped genres will become 0 to indicate unknown.
+    df[label_col] = df[genre_col].map(mapping).fillna(0).astype(int)
+
+    out_path = scenario_dir / out_csv_name
+    df.to_csv(out_path, index=False)
+    return str(out_path), mapping
 
 
 if __name__ == '__main__':
@@ -116,6 +198,16 @@ if __name__ == '__main__':
         print('Sample inferred genres:', summary['inferred_sample'])
     if summary['not_found_sample']:
         print('Sample track_ids not found:', summary['not_found_sample'])
+
+    # Also generate a numeric-labeled CSV for modeling (genres -> integers 1..15)
+    try:
+        # Use the filtered CSV that only contains rows with a genre
+        numeric_path, mapping_used = apply_genre_labeling(SCENARIO_DIR, source_csv_name='Music Info_genre_present.csv')
+        print(f"Numeric-labeled CSV saved to: {numeric_path}")
+        print(f"Genre to label mapping used: {mapping_used}")
+        print(f"Rows kept (with genre): {summary.get('rows_kept')}, rows removed: {summary.get('rows_removed')}")
+    except Exception as e:
+        print(f"Could not create numeric-labeled CSV: {e}")
 
 
 
