@@ -17,8 +17,7 @@ base_mp3_dir = Path(r"C:\Users\warty\OneDrive\Desktop\Python_projects\Capstone_m
 audio_files = []
 for subfolder in sorted([p for p in base_mp3_dir.iterdir() if p.is_dir()]):
     mp3s = sorted(subfolder.glob('*.mp3'))
-    # If you want to include nested folders use subfolder.rglob('*.mp3') instead
-    # Collect only the first file from each genre folder
+
     audio_files.extend([str(p) for p in mp3s[:1]])
 
 
