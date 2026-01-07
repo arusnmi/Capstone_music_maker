@@ -3,23 +3,20 @@ from pathlib import Path
 import os
 from datetime import datetime
 
+# plotting
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.set_style('whitegrid')
+
+# use a non-interactive backend when running in headless environments
+plt.switch_backend('Agg')
+
 # Paths
 SCENARIO_DIR = Path(r"C:/Users/warty/OneDrive/Desktop/Python_projects/Capstone_music_maker/Scenario 2_ AI Music Composer & Listener Insight platform")
 MUSIC_INFO = SCENARIO_DIR / "Music Info.csv"
 
 
 def filter_genre_and_copy_scenario(scenario_dir: Path, copy_suffix: str = "-genre_filtered", perform_deletions: bool = False):
-    """Fill missing genres by searching MP3 files, save filled CSV and filtered CSV.
-
-    Behavior:
-    - Search `MP3-Example` for files whose name contains a track_id with missing genre.
-    - If found, infer genre from the MP3's subfolder name (preferred) or file name prefix before the first '-'.
-    - Update the DataFrame with inferred genres, save `Music Info_genre_filled.csv`.
-    - Save `Music Info_genre_present.csv` which contains only rows where genre is present.
-    - NOTE: This function no longer creates copies of the scenario folder and will not delete any files.
-
-    Returns summary dict with counts and paths.
-    """
     if not scenario_dir.exists():
         raise FileNotFoundError(f"Scenario folder not found: {scenario_dir}")
 
@@ -183,6 +180,149 @@ def apply_genre_labeling(scenario_dir: Path,
     return str(out_path), mapping
 
 
+def apply_artist_labeling(scenario_dir: Path,
+                          source_csv_name: str = 'Music Info_genre_numeric.csv',
+                          out_csv_name: str = 'Music Info_labeled.csv',
+                          artist_col: str = 'artist',
+                          label_col: str = 'artist_label',
+                          mapping: dict = None):
+    """Map textual artists to integer labels derived from the source CSV and save a combined CSV.
+
+    If `mapping` is None, the function builds a mapping by counting artist frequency
+    in `source_csv_name` and assigns integer labels 1.. based on descending frequency.
+
+    The function tries the following sources in order: `source_csv_name`,
+    `Music Info_genre_present.csv`, then `Music Info.csv`.
+
+    Rows with missing or blank artist are ignored when creating the mapping; those
+    rows will receive label 0 in the output.
+
+    Returns a tuple (out_csv_path_str, mapping_used).
+    """
+    source = scenario_dir / source_csv_name
+    if not source.exists():
+        # fallback to genre-present, then original
+        source = scenario_dir / 'Music Info_genre_present.csv'
+        if not source.exists():
+            source = scenario_dir / 'Music Info.csv'
+            if not source.exists():
+                raise FileNotFoundError(f"No source CSV found at {scenario_dir}")
+
+    df = pd.read_csv(source)
+    if artist_col not in df.columns:
+        raise KeyError(f"'{artist_col}' column not found in {source}")
+
+    # Build mapping from dataset if not provided
+    if mapping is None:
+        artists = df[artist_col].dropna().astype(str).str.strip()
+        artists = artists[artists != '']
+        if artists.empty:
+            # No artists present to map
+            mapping = {}
+        else:
+            artist_list = artists.value_counts().index.tolist()
+            mapping = {a: i + 1 for i, a in enumerate(artist_list)}
+
+    # Map artists to labels. Unmapped artists will become 0 to indicate unknown.
+    df[label_col] = df[artist_col].map(mapping).fillna(0).astype(int)
+
+    out_path = scenario_dir / out_csv_name
+    df.to_csv(out_path, index=False)
+    return str(out_path), mapping
+
+
+def generate_visualizations(scenario_dir: Path,
+                            source_csv_name: str = 'Music Info_labeled.csv',
+                            out_dir_name: str = 'plots',
+                            top_n_genres: int = 10):
+    """Create and save charts (Energy vs Valence scatter, Tempo distribution, Loudness by valence/genre).
+
+    - Scatter: energy vs valence colored by genre (top N)
+    - Tempo distribution: boxplot of tempo by genre (top N)
+    - Loudness by valence: boxplot of loudness by valence bins and/or by genre
+
+    The function writes PNG files into `scenario_dir/out_dir_name` and returns a list of paths.
+    """
+    out_dir = scenario_dir / out_dir_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    source = scenario_dir / source_csv_name
+    if not source.exists():
+        raise FileNotFoundError(f"Visualization source CSV not found: {source}")
+
+    df = pd.read_csv(source)
+
+    saved = []
+
+    # Prepare top genres
+    if 'genre' in df.columns:
+        genre_counts = df['genre'].dropna().astype(str).str.strip().value_counts()
+        top_genres = genre_counts.index.tolist()[:top_n_genres]
+        df['genre_for_plot'] = df['genre'].astype(str).where(df['genre'].isin(top_genres), other='Other')
+    else:
+        df['genre_for_plot'] = 'Unknown'
+
+    # 1) Scatter: energy vs valence
+    if {'energy', 'valence'}.issubset(df.columns):
+        plt.figure(figsize=(10, 6))
+        sns.scatterplot(data=df, x='energy', y='valence', hue='genre_for_plot', alpha=0.6, s=40)
+        plt.title('Energy vs Valence (colored by genre)')
+        plt.xlabel('Energy')
+        plt.ylabel('Valence')
+        plt.legend(title='Genre', bbox_to_anchor=(1.05, 1), loc='upper left')
+        scatter_path = out_dir / 'energy_vs_valence_scatter.png'
+        plt.tight_layout()
+        plt.savefig(scatter_path)
+        plt.close()
+        saved.append(str(scatter_path))
+
+    # 2) Tempo distribution by genre (boxplot)
+    if 'tempo' in df.columns or 'tempo_bpm' in df.columns:
+        tempo_col = 'tempo' if 'tempo' in df.columns else 'tempo_bpm'
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(data=df[df['genre_for_plot'].isin(top_genres + ['Other'])], x='genre_for_plot', y=tempo_col)
+        plt.title(f'Tempo distribution by genre (top {top_n_genres})')
+        plt.xlabel('Genre')
+        plt.ylabel('Tempo (BPM)')
+        plt.xticks(rotation=45, ha='right')
+        tempo_path = out_dir / 'tempo_by_genre_boxplot.png'
+        plt.tight_layout()
+        plt.savefig(tempo_path)
+        plt.close()
+        saved.append(str(tempo_path))
+
+    # 3) Loudness comparison across valence bins and by genre
+    if 'loudness' in df.columns and 'valence' in df.columns:
+        # create valence bins: low, medium, high
+        df['valence_bin'] = pd.cut(df['valence'], bins=[-0.01, 0.33, 0.66, 1.0], labels=['low', 'medium', 'high'])
+        plt.figure(figsize=(10, 6))
+        sns.boxplot(data=df, x='valence_bin', y='loudness')
+        plt.title('Loudness by Valence bin')
+        plt.xlabel('Valence (mood)')
+        plt.ylabel('Loudness (dB)')
+        loudness_valence_path = out_dir / 'loudness_by_valence_bin.png'
+        plt.tight_layout()
+        plt.savefig(loudness_valence_path)
+        plt.close()
+        saved.append(str(loudness_valence_path))
+
+        # Loudness by genre (top)
+        plt.figure(figsize=(12, 6))
+        sns.boxplot(data=df[df['genre_for_plot'].isin(top_genres + ['Other'])], x='genre_for_plot', y='loudness')
+        plt.title(f'Loudness by Genre (top {top_n_genres})')
+        plt.xlabel('Genre')
+        plt.ylabel('Loudness (dB)')
+        plt.xticks(rotation=45, ha='right')
+        loudness_genre_path = out_dir / 'loudness_by_genre_boxplot.png'
+        plt.tight_layout()
+        plt.savefig(loudness_genre_path)
+        plt.close()
+        saved.append(str(loudness_genre_path))
+
+    # Return saved file paths
+    return saved
+
+
 if __name__ == '__main__':
     print("Filling missing genres from MP3 files (no folder copies or deletions will be performed)...")
     summary = filter_genre_and_copy_scenario(SCENARIO_DIR, perform_deletions=False)
@@ -208,6 +348,26 @@ if __name__ == '__main__':
         print(f"Rows kept (with genre): {summary.get('rows_kept')}, rows removed: {summary.get('rows_removed')}")
     except Exception as e:
         print(f"Could not create numeric-labeled CSV: {e}")
+
+    # Now label artists and produce a combined CSV containing both genre and artist labels
+    try:
+        labeled_path, artist_mapping = apply_artist_labeling(SCENARIO_DIR,
+                                                            source_csv_name='Music Info_genre_numeric.csv',
+                                                            out_csv_name='Music Info_labeled.csv')
+        print(f"Artist-labeled CSV saved to: {labeled_path}")
+        print(f"Number of artists labeled: {len(artist_mapping)}")
+        print(f"Sample artist mapping: {dict(list(artist_mapping.items())[:20])}")
+    except Exception as e:
+        print(f"Could not create artist-labeled CSV: {e}")
+
+    # Generate visualizations and save charts to the scenario 'plots' folder
+    try:
+        saved_paths = generate_visualizations(SCENARIO_DIR, source_csv_name='Music Info_labeled.csv', out_dir_name='plots', top_n_genres=12)
+        print('Saved charts:')
+        for p in saved_paths:
+            print(' -', p)
+    except Exception as e:
+        print(f"Could not create visualizations: {e}")
 
 
 
