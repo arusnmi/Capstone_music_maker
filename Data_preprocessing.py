@@ -1,9 +1,3 @@
-# ==============================
-# DATA PRE-PROCESSING PIPELINE
-# (Structured to match video sections)
-# ==============================
-
-# -------- 1. Imports & Environment Setup --------
 import pandas as pd
 from pathlib import Path
 import os
@@ -11,22 +5,13 @@ from datetime import datetime
 import librosa
 import numpy as np
 import shutil
-
-# -------- 2. Visualization Setup (EDA Support) --------
 import matplotlib.pyplot as plt
 import seaborn as sns
 sns.set_style('whitegrid')
-plt.switch_backend('Agg')  # non-interactive backend for headless runs
+plt.switch_backend('Agg')
 
-# -------- 3. Path Configuration & Data Loading --------
 SCENARIO_DIR = Path(r"C:/Users/warty/OneDrive/Desktop/Python_projects/Capstone_music_maker/Scenario 2_ AI Music Composer & Listener Insight platform")
 MUSIC_INFO = SCENARIO_DIR / "Music Info.csv"
-
-# -------- 4. Data Cleaning --------
-# (Video wording: 3:10–7:14)
-# - Drop unnecessary columns
-# - Remove Spotify-specific metadata
-# - Keep only extracted audio features per song
 
 
 def filter_genre_and_copy_scenario(scenario_dir: Path,
@@ -37,11 +22,8 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
 
     df = pd.read_csv(scenario_dir / "Music Info.csv")
 
-    # -------- Dropping Columns (as mentioned in video) --------
-    # Remove any column containing 'spotify'
     df = df.loc[:, ~df.columns.str.contains('spotify', case=False)]
 
-    # Explicitly drop non-required features
     columns_to_drop = [
         'danceability',
         'year',
@@ -49,30 +31,17 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
     ]
     df = df.drop(columns=[c for c in columns_to_drop if c in df.columns])
 
-    # -------- Feature Extraction from Songs --------
-# (Video wording: 3:10–4:43)
-# "We extract audio features directly from each song file"
-# Extracted features per song:
-# energy, key, loudness, mode,
-# speechiness, acousticness,
-# instrumentalness, valence, tempo
-
-    # Path where audio files are stored
     AUDIO_DIR = scenario_dir / 'MP3-Example'
 
-    # Replace existing dataset values by re-extracting features using librosa
     extracted_features = []
 
-    # Directory to store per-song feature files (.npz)
     FEATURE_DIR = scenario_dir / 'npz_features'
     FEATURE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Directory to store .npz files organized by genre (sorted immediately after extraction)
     npz_sorted_dir = scenario_dir / 'npz_by_genre'
     npz_sorted_dir.mkdir(exist_ok=True)
     not_sorted_tracks = []
 
-    # Pre-scan MP3 folders to build token -> genre map (helpful for inference)
     token_genre_map = {}
     if AUDIO_DIR.exists():
         for sub in AUDIO_DIR.iterdir():
@@ -87,7 +56,6 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
         track_id = str(row['track_id'])
         audio_path = None
 
-        # Search for matching audio file
         for root, _, files in os.walk(AUDIO_DIR):
             for file in files:
                 if file.endswith('.mp3') and track_id in file:
@@ -99,36 +67,26 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
         if audio_path is None:
             continue
 
-        # Load audio
         y, sr = librosa.load(audio_path, sr=None, mono=True)
 
-        # Energy (RMS)
         energy = np.mean(librosa.feature.rms(y=y))
 
-        # Key (dominant pitch class)
         chroma = librosa.feature.chroma_stft(y=y, sr=sr)
         key = int(np.argmax(np.mean(chroma, axis=1)))
 
-        # Loudness (normalized later)
         loudness = np.mean(librosa.amplitude_to_db(np.abs(y)))
 
-        # Tempo
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
 
-        # Spectral features as proxies
         speechiness = np.mean(librosa.feature.spectral_flatness(y=y))
         acousticness = np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr))
         instrumentalness = np.mean(librosa.feature.zero_crossing_rate(y))
 
-        # Valence approximation (based on spectral centroid)
         valence = np.mean(librosa.feature.spectral_centroid(y=y, sr=sr))
 
-        # Mode (binary mood encoding)
         mode = 1 if valence > np.mean(valence) else 0
 
-        # Save features into individual .npz file (as stated in video)
         npz_path = FEATURE_DIR / f"{track_id}.npz"
-        # ensure parent directory exists before saving (avoid race/OneDrive issues)
         npz_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             np.savez(
@@ -160,16 +118,12 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
             'valence': valence,
             'tempo': tempo
         })
-        # Confirmation print for each processed track
         print(f"[INFO] Extracted features for track {track_id} -> {npz_path}")
 
-        # --- Immediately sort the .npz into its genre folder ---
         genre_to_use = None
-        # Prefer explicit genre in CSV if available
         if 'genre' in row and pd.notna(row['genre']) and str(row['genre']).strip() != '':
             genre_to_use = str(row['genre']).strip()
         else:
-            # Try to infer genre from filename token (e.g., 'Artist-TOKEN.mp3')
             if audio_path is not None and '-' in audio_path.name:
                 token = audio_path.name.split('-', 1)[1].rsplit('.', 1)[0]
                 genre_to_use = token_genre_map.get(token)
@@ -191,36 +145,26 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
             print(f"[WARN] Could not determine genre for {track_id} (file: {audio_path.name})")
             not_sorted_tracks.append(track_id)
 
-    # Merge extracted features back into dataframe
-    # (Dataset is kept only for analysis; training uses .npz files)
     feature_df = pd.DataFrame(extracted_features)
     required_features = []
     df = df.drop(columns=required_features, errors='ignore')
     df = df.merge(feature_df, on='track_id', how='left')
 
-    # -------- Feature Normalisation & Encoding --------
-    # Loudness normalised to range [0, 1]
     if 'loudness' in df.columns:
         min_loud, max_loud = df['loudness'].min(), df['loudness'].max()
         if max_loud != min_loud:
             df['loudness'] = (df['loudness'] - min_loud) / (max_loud - min_loud)
 
-    # Mode encoding (explicitly binary)
-    # 0 = negative mood, 1 = positive mood
     if 'mode' in df.columns:
         df['mode'] = df['mode'].astype(int)
-        # Loudness normalised to range [0, 1]
         if 'loudness' in df.columns:
             min_loud, max_loud = df['loudness'].min(), df['loudness'].max()
             if max_loud != min_loud:
                 df['loudness'] = (df['loudness'] - min_loud) / (max_loud - min_loud)
 
-        # Mode encoding:
-        # 0 = negative mood, 1 = positive mood
         if 'mode' in df.columns:
             df['mode'] = df['mode'].apply(lambda x: 1 if x == 1 else 0)
 
-    # -------- Handling Missing Genres --------
     mask_present = df['genre'].notna() & df['genre'].astype(str).str.strip().ne('')
     missing_idx = df.loc[~mask_present].index.tolist()
     missing_track_ids = df.loc[~mask_present, 'track_id'].astype(str).tolist()
@@ -251,14 +195,11 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
         df['inferred_genre'] = ''
         not_found = missing_track_ids.copy()
 
-    # -------- Final Cleaned Outputs --------
     df.to_csv(scenario_dir / 'Music Info_genre_filled.csv', index=False)
 
     mask_present_after = df['genre'].notna() & df['genre'].astype(str).str.strip().ne('')
     df_present = df[mask_present_after].copy()
 
-    # Organize .npz files by genre into a separate folder (ensure every present genre
-    # has a corresponding folder and that the FEATURE_DIR .npz files are copied there)
     mp3_root = scenario_dir / 'MP3-Example'
     copied = 0
     missing_npzs = []
@@ -304,7 +245,6 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
     }
     return summary
 
-# -------- 5. Feature Encoding: Categorical → Numerical --------
 GENRE_TO_LABEL = {
     'Blues': 1, 'Country': 2, 'Electronic': 3, 'Folk': 4, 'Jazz': 5,
     'Latin': 6, 'Metal': 7, 'New Age': 8, 'Pop': 9, 'Punk': 10,
@@ -320,7 +260,6 @@ def apply_genre_labeling(scenario_dir: Path,
                          cap_labels_to: int = 15):
     df = pd.read_csv(scenario_dir / source_csv_name)
 
-    # Frequency-based label encoding (top-N genres)
     if mapping is None:
         genres = df[genre_col].dropna().astype(str).str.strip()
         genres = genres[genres != '']
@@ -331,9 +270,6 @@ def apply_genre_labeling(scenario_dir: Path,
     out_path = scenario_dir / out_csv_name
     df.to_csv(out_path, index=False)
     return str(out_path), mapping
-
-# -------- 6. Artist Encoding --------
-# Similar categorical encoding applied to artists
 
 def apply_artist_labeling(scenario_dir: Path,
                           source_csv_name: str = 'Music Info_genre_numeric.csv',
@@ -349,9 +285,6 @@ def apply_artist_labeling(scenario_dir: Path,
     df.to_csv(out_path, index=False)
     return str(out_path), mapping
 
-# -------- 7. Exploratory Data Analysis (EDA) --------
-# Visual checks to understand feature distributions
-
 def generate_visualizations(scenario_dir: Path,
                             source_csv_name: str = 'Music Info_labeled.csv'):
     df = pd.read_csv(scenario_dir / source_csv_name)
@@ -364,9 +297,6 @@ def generate_visualizations(scenario_dir: Path,
         plt.title('Energy vs Valence')
         plt.savefig(out_dir / 'energy_vs_valence.png')
         plt.close()
-
-# -------- 8. Final Output for Modeling --------
-# Resulting CSV is clean, encoded, and ready for ML models
 
 if __name__ == '__main__':
     summary = filter_genre_and_copy_scenario(SCENARIO_DIR)
