@@ -4,6 +4,7 @@ import os
 from datetime import datetime
 import librosa
 import numpy as np
+import json
 import shutil
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -14,6 +15,80 @@ SCENARIO_DIR = Path(r"C:/Users/warty/OneDrive/Desktop/Python_projects/Capstone_m
 MUSIC_INFO = SCENARIO_DIR / "Music Info.csv"
 
 
+def extract_metadata_for_track(track_id: str, scenario_dir: Path = SCENARIO_DIR, df: pd.DataFrame = None):
+    """Convenience function to return the requested metadata dict for a track_id.
+    Matches keys:
+    track_id, name, tags, genre, mode, time_signature, danceability, energy, loudness,
+    speechiness, acousticness, instrumentalness, liveness, valence
+
+    This function will attempt to coerce numeric fields to floats (and mode to int) when possible,
+    and will return empty strings for missing values.
+    """
+    if df is None:
+        df = pd.read_csv(scenario_dir / "Music Info.csv")
+
+    row = df.loc[df['track_id'].astype(str) == str(track_id)]
+    if row.empty:
+        metadata_dict = {
+            "track_id": str(track_id),
+            "name": "",
+            "tags": "",
+            "genre": "",
+            "mode": "",
+            "time_signature": "",
+            "danceability": "",
+            "energy": "",
+            "loudness": "",
+            "speechiness": "",
+            "acousticness": "",
+            "instrumentalness": "",
+            "liveness": "",
+            "valence": ""
+        }
+        return metadata_dict
+
+    meta = row.iloc[0].to_dict()
+
+    metadata_dict = {
+        "track_id": str(track_id),
+        "name": meta.get("name", ""),
+        "tags": meta.get("tags", ""),
+        "genre": meta.get("genre", ""),
+        "mode": meta.get("mode", ""),
+        "time_signature": meta.get("time_signature", ""),
+        "danceability": meta.get("danceability", ""),
+        "energy": meta.get("energy", ""),
+        "loudness": meta.get("loudness", ""),
+        "speechiness": meta.get("speechiness", ""),
+        "acousticness": meta.get("acousticness", ""),
+        "instrumentalness": meta.get("instrumentalness", ""),
+        "liveness": meta.get("liveness", ""),
+        "valence": meta.get("valence", "")
+    }
+
+    # Coerce numeric-like fields to floats where possible
+    for k in ["danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "time_signature"]:
+        try:
+            v = metadata_dict.get(k, "")
+            if v is not None and v != "" and not pd.isna(v):
+                metadata_dict[k] = float(v)
+            else:
+                metadata_dict[k] = ""
+        except Exception:
+            metadata_dict[k] = ""
+
+    # coerce mode to int when possible
+    try:
+        if metadata_dict.get("mode", "") != "" and not pd.isna(metadata_dict.get("mode")):
+            metadata_dict["mode"] = int(float(metadata_dict["mode"]))
+        else:
+            metadata_dict["mode"] = ""
+    except Exception:
+        metadata_dict["mode"] = ""
+
+    return metadata_dict
+
+
 def filter_genre_and_copy_scenario(scenario_dir: Path,
                                    copy_suffix: str = "-genre_filtered",
                                    perform_deletions: bool = False):
@@ -22,14 +97,12 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
 
     df = pd.read_csv(scenario_dir / "Music Info.csv")
 
-    df = df.loc[:, ~df.columns.str.contains('spotify', case=False)]
+    # Keep all metadata columns; do not drop any columns automatically.
+    # (Removed previous filtering such as columns containing 'spotify' to preserve metadata.)
 
-    columns_to_drop = [
-        'danceability',
-        'year',
-        'time_signature'
-    ]
-    df = df.drop(columns=[c for c in columns_to_drop if c in df.columns])
+    # Keep all metadata columns (e.g., danceability, time_signature) so they can be
+    # included in each song's .npz file and used later for analysis.
+
 
     AUDIO_DIR = scenario_dir / 'MP3-Example'
 
@@ -69,37 +142,43 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
 
         y, sr = librosa.load(audio_path, sr=None, mono=True)
 
-        energy = np.mean(librosa.feature.rms(y=y))
-
-        chroma = librosa.feature.chroma_stft(y=y, sr=sr)
-        key = int(np.argmax(np.mean(chroma, axis=1)))
-
-        loudness = np.mean(librosa.amplitude_to_db(np.abs(y)))
-
+        # Audio-derived features (as requested: tempo, energy, MFCC, chroma, centroids)
+        energy = float(np.mean(librosa.feature.rms(y=y)))
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+        centroids = librosa.feature.spectral_centroid(y=y, sr=sr)
+        loudness = float(np.mean(librosa.amplitude_to_db(np.abs(y))))
 
-        speechiness = np.mean(librosa.feature.spectral_flatness(y=y))
-        acousticness = np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr))
-        instrumentalness = np.mean(librosa.feature.zero_crossing_rate(y))
+        # Simple summary scalars for CSV merging
+        mfcc_mean = float(np.mean(np.abs(mfcc)))
+        chroma_mean = float(np.mean(np.abs(chroma)))
+        centroids_mean = float(np.mean(np.abs(centroids)))
 
-        valence = np.mean(librosa.feature.spectral_centroid(y=y, sr=sr))
-
-        mode = 1 if valence > np.mean(valence) else 0
+        # get metadata for this track (from CSV) using typed extractor
+        metadata = extract_metadata_for_npz(track_id, scenario_dir, df)
 
         npz_path = FEATURE_DIR / f"{track_id}.npz"
         npz_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            np.savez(
-            npz_path,
-            energy=energy,
-            key=key,
-            loudness=loudness,
-            mode=mode,
-            speechiness=speechiness,
-            acousticness=acousticness,
-            instrumentalness=instrumentalness,
-            valence=valence,
-            tempo=tempo
+            # Save full arrays (mfcc, chroma, centroids), requested scalar features (tempo, energy),
+            # and metadata fields (both as a dict and as individual prefixed entries).
+            meta_kwargs = {}
+            for k, v in metadata.items():
+                meta_kwargs[f"meta_{k}"] = v
+
+            np.savez_compressed(
+                npz_path,
+                tempo=float(tempo),
+                energy=float(energy),
+                mfcc=mfcc,
+                chroma=chroma,
+                centroids=centroids,
+                mfcc_mean=mfcc_mean,
+                chroma_mean=chroma_mean,
+                centroids_mean=centroids_mean,
+                metadata_json=json.dumps(metadata),
+                **meta_kwargs
             )
         except Exception as e:
             print(f"[ERROR] Failed to save .npz for {track_id}: {e}")
@@ -108,16 +187,14 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
 
         extracted_features.append({
             'track_id': track_id,
-            'energy': energy,
-            'key': key,
+            'tempo': float(tempo),
+            'energy': float(energy),
             'loudness': loudness,
-            'mode': mode,
-            'speechiness': speechiness,
-            'acousticness': acousticness,
-            'instrumentalness': instrumentalness,
-            'valence': valence,
-            'tempo': tempo
+            'mfcc_mean': mfcc_mean,
+            'chroma_mean': chroma_mean,
+            'centroids_mean': centroids_mean
         })
+        print(f"[INFO] Extracted features for track {track_id} -> {npz_path}")
         print(f"[INFO] Extracted features for track {track_id} -> {npz_path}")
 
         genre_to_use = None
@@ -146,8 +223,6 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
             not_sorted_tracks.append(track_id)
 
     feature_df = pd.DataFrame(extracted_features)
-    required_features = []
-    df = df.drop(columns=required_features, errors='ignore')
     df = df.merge(feature_df, on='track_id', how='left')
 
     if 'loudness' in df.columns:
@@ -244,6 +319,146 @@ def filter_genre_and_copy_scenario(scenario_dir: Path,
         'timestamp': datetime.utcnow().isoformat()
     }
     return summary
+
+
+def get_metadata_for_track(scenario_dir: Path, track_id: str, df: pd.DataFrame = None):
+    """Return a metadata dictionary for a given track_id from the Music Info CSV or provided DataFrame."""
+    if df is None:
+        df = pd.read_csv(scenario_dir / "Music Info.csv")
+
+    row = df.loc[df['track_id'].astype(str) == str(track_id)]
+    if row.empty:
+        return {
+            "track_id": str(track_id),
+            "name": "",
+            "tags": "",
+            "genre": "",
+            "mode": "",
+            "time_signature": "",
+            "danceability": "",
+            "energy": "",
+            "loudness": "",
+            "speechiness": "",
+            "acousticness": "",
+            "instrumentalness": "",
+            "liveness": "",
+            "valence": ""
+        }
+
+    meta = row.iloc[0].to_dict()
+    metadata_dict = {
+        "track_id": str(track_id),
+        "name": meta.get("name", ""),
+        "tags": meta.get("tags", ""),
+        "genre": meta.get("genre", ""),
+        "mode": meta.get("mode", ""),
+        "time_signature": meta.get("time_signature", ""),
+        "danceability": meta.get("danceability", ""),
+        "energy": meta.get("energy", ""),
+        "loudness": meta.get("loudness", ""),
+        "speechiness": meta.get("speechiness", ""),
+        "acousticness": meta.get("acousticness", ""),
+        "instrumentalness": meta.get("instrumentalness", ""),
+        "liveness": meta.get("liveness", ""),
+        "valence": meta.get("valence", "")
+    }
+    return metadata_dict
+
+
+def extract_metadata_for_track(track_id: str, scenario_dir: Path = SCENARIO_DIR, df: pd.DataFrame = None):
+    """
+    Return a metadata dict for a given track_id with typed numeric fields when possible.
+    Matches the requested metadata structure for inclusion in .npz files.
+    """
+    meta = get_metadata_for_track(scenario_dir, track_id, df)
+
+    # Try to coerce numeric fields to float where appropriate; keep empty strings if missing.
+    numeric_fields = [
+        "danceability", "energy", "loudness", "speechiness",
+        "acousticness", "instrumentalness", "liveness", "valence", "time_signature"
+    ]
+    for k in numeric_fields:
+        v = meta.get(k, "")
+        try:
+            if v is not None and v != "" and not pd.isna(v):
+                meta[k] = float(v)
+            else:
+                meta[k] = ""
+        except Exception:
+            meta[k] = ""
+
+    # Mode typically 0/1; coerce to int when possible.
+    try:
+        if meta.get("mode", "") != "" and not pd.isna(meta.get("mode")):
+            meta["mode"] = int(float(meta["mode"]))
+        else:
+            meta["mode"] = ""
+    except Exception:
+        meta["mode"] = ""
+
+    return meta
+
+def extract_metadata_for_npz(track_id: str, scenario_dir: Path = SCENARIO_DIR, df: pd.DataFrame = None):
+    """Return metadata dict for inclusion in .npz files (typed where possible)."""
+    if df is None:
+        df = pd.read_csv(scenario_dir / "Music Info.csv")
+
+    row = df.loc[df['track_id'].astype(str) == str(track_id)]
+    if row.empty:
+        return {
+            "track_id": str(track_id),
+            "name": "",
+            "tags": "",
+            "genre": "",
+            "mode": "",
+            "time_signature": "",
+            "danceability": "",
+            "energy": "",
+            "loudness": "",
+            "speechiness": "",
+            "acousticness": "",
+            "instrumentalness": "",
+            "liveness": "",
+            "valence": ""
+        }
+
+    meta = row.iloc[0].to_dict()
+    metadata_dict = {
+        "track_id": str(track_id),
+        "name": meta.get("name", ""),
+        "tags": meta.get("tags", ""),
+        "genre": meta.get("genre", ""),
+        "mode": meta.get("mode", ""),
+        "time_signature": meta.get("time_signature", ""),
+        "danceability": meta.get("danceability", ""),
+        "energy": meta.get("energy", ""),
+        "loudness": meta.get("loudness", ""),
+        "speechiness": meta.get("speechiness", ""),
+        "acousticness": meta.get("acousticness", ""),
+        "instrumentalness": meta.get("instrumentalness", ""),
+        "liveness": meta.get("liveness", ""),
+        "valence": meta.get("valence", "")
+    }
+
+    for k in ["danceability", "energy", "loudness", "speechiness", "acousticness", "instrumentalness", "liveness", "valence", "time_signature"]:
+        try:
+            v = metadata_dict.get(k, "")
+            if v is not None and v != "" and not pd.isna(v):
+                metadata_dict[k] = float(v)
+            else:
+                metadata_dict[k] = ""
+        except Exception:
+            metadata_dict[k] = ""
+
+    try:
+        if metadata_dict.get("mode", "") != "" and not pd.isna(metadata_dict.get("mode")):
+            metadata_dict["mode"] = int(float(metadata_dict["mode"]))
+        else:
+            metadata_dict["mode"] = ""
+    except Exception:
+        metadata_dict["mode"] = ""
+
+    return metadata_dict
 
 GENRE_TO_LABEL = {
     'Blues': 1, 'Country': 2, 'Electronic': 3, 'Folk': 4, 'Jazz': 5,
