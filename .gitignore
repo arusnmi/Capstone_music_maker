@@ -169,6 +169,8 @@ Scenario 2_ AI Music Composer & Listener Insight platform
 plots
 
 npz_features
+
+mel_npz
 #venv
 
 song
