@@ -44,7 +44,7 @@ if not torch.cuda.is_available():
     raise RuntimeError("CUDA GPU REQUIRED")
 
 torch.backends.cudnn.benchmark = True
-DEVICE = torch.device("cuda")
+DEVICE = torch.device(0)
 
 
 # =========================
@@ -181,7 +181,11 @@ def train_model(dataset):
 # Generation
 # =========================
 def generate_audio(model, dataset):
-    ckpt = torch.load(SAVE_MODEL, map_location="cpu")
+    ckpt = torch.load(
+    SAVE_MODEL,
+    map_location="cpu",
+    weights_only=False
+)
     model.load_state_dict(ckpt["model_state"])
     model.eval().to(DEVICE)
 

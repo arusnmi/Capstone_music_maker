@@ -171,6 +171,7 @@ plots
 npz_features
 
 mel_npz
+checkpoints
 #venv
 
 song
