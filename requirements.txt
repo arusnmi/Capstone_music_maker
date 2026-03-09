@@ -1,1 +1,16 @@
 streamlit
+pandas
+numpy
+matplotlib
+seaborn
+librosa
+torchaudio
+tensorflow
+torch
+torchvision
+torchaudio
+scikit-learn
+plotly
+google-generativeai
+requests
+pillow
